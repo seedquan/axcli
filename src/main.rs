@@ -13,8 +13,8 @@
 //!   axcli --app Lark focus '.SearchInput'
 //!   axcli --app Lark scroll-to '.item'
 //!   axcli --app Lark scroll '.chat-list' down 300
-//!   axcli --app Lark screenshot -o /tmp/shot.png
-//!   axcli --app Lark screenshot '.SearchButton' -o /tmp/btn.png
+//!   axcli --app Lark screenshot
+//!   axcli --app Lark screenshot '.SearchButton' -o ./btn.png
 //!   axcli --app Lark wait '.loading'
 //!   axcli --app Lark wait 500
 //!   axcli --app Lark get AXValue '.SearchInput'
@@ -324,13 +324,14 @@ enum Command {
     /// Uses ScreenCaptureKit to capture the window in the background — the target
     /// app does NOT need to be in the foreground, and occluded windows are captured
     /// correctly. Falls back to legacy CGWindowListCreateImage if SCK is unavailable.
-    /// Saves PNG to file. Use --ocr to also extract text via Vision framework.
+    /// Saves a private (0600) PNG under ~/Library/Caches/axcli (0700) by default.
+    /// Use --ocr to also extract text via Vision framework.
     /// Prefer `snapshot` for structured exploration (faster, no file I/O).
     /// Use screenshot when you need visual context or multimodal analysis.
     Screenshot {
         /// Locator selector (optional, for element screenshot)
         locator: Option<String>,
-        /// Output file path
+        /// Output file path (0600); defaults to ~/Library/Caches/axcli/
         #[arg(short, long)]
         output: Option<String>,
         /// Run OCR on the captured image (Vision framework, zh-Hans + en-US).
@@ -828,7 +829,7 @@ fn cmd_keyboard(action: &KeyboardAction) -> Result<(), AxError> {
     }
     match action {
         KeyboardAction::Type { text } => {
-            eprintln!("Typing: {text:?}");
+            eprintln!("{}", input_status("Typing", text));
             input::type_text(text);
         }
         KeyboardAction::Press { key } => {
@@ -1026,13 +1027,18 @@ fn cmd_dblclick(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
     Ok(())
 }
 
+/// Input contents may contain credentials, so feedback includes only a count.
+fn input_status(action: &str, text: &str) -> String {
+    format!("{action}: <redacted; {} characters>", text.chars().count())
+}
+
 fn cmd_input(ctx: &ExecutionContext, locator: &str, text: &str) -> Result<(), AxError> {
     let node = resolve_one(ctx, locator)?;
 
     ctx.activate();
     ensure_focused(ctx, &node)?;
 
-    eprintln!("Typing: {text:?}");
+    eprintln!("{}", input_status("Typing", text));
     input::type_text(text);
     Ok(())
 }
@@ -1051,7 +1057,7 @@ fn cmd_fill(ctx: &ExecutionContext, locator: &str, text: &str) -> Result<(), AxE
     input::press_key_combo(kc_del, fl_del);
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    eprintln!("Filling: {text:?}");
+    eprintln!("{}", input_status("Filling", text));
     input::type_text(text);
     Ok(())
 }
@@ -1230,15 +1236,12 @@ fn run_ocr(image: &CGImage) -> Result<(), AxError> {
 fn cmd_screenshot(ctx: &ExecutionContext, locator: Option<&str>, output: Option<&str>, ocr: bool, legacy: bool) -> Result<(), AxError> {
     screenshot::ensure_cg_init();
 
-    let path = output
-        .map(String::from)
-        .unwrap_or_else(|| {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            format!("/tmp/ax_screenshot_{ts}.png")
-        });
+    let output_path = match output {
+        Some(path) => std::path::PathBuf::from(path),
+        None => screenshot::default_output_path()
+            .map_err(|e| AxError::ScreenshotFailed(format!("private output directory: {e}")))?,
+    };
+    let path = output_path.display();
 
     // Legacy path: activate app to foreground + CGWindowListCreateImage
     if legacy {
@@ -1270,7 +1273,7 @@ fn cmd_screenshot(ctx: &ExecutionContext, locator: Option<&str>, output: Option<
         };
         let image = screenshot::capture(rect)
             .ok_or_else(|| AxError::ScreenshotFailed("capture failed".to_string()))?;
-        if !screenshot::save_png(&image, &path) {
+        if !screenshot::save_png(&image, &output_path) {
             return Err(AxError::ScreenshotFailed(format!("failed to save {path}")));
         }
         eprintln!("Saved: {path}");
@@ -1360,7 +1363,7 @@ fn cmd_screenshot(ctx: &ExecutionContext, locator: Option<&str>, output: Option<
         }
     };
 
-    if !screenshot::save_png(&image, &path) {
+    if !screenshot::save_png(&image, &output_path) {
         return Err(AxError::ScreenshotFailed(format!("failed to save {path}")));
     }
     eprintln!("Saved: {path}");
@@ -1370,6 +1373,26 @@ fn cmd_screenshot(ctx: &ExecutionContext, locator: Option<&str>, output: Option<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn input_feedback_redacts_credentials_and_counts_unicode_characters() {
+        for action in ["Typing", "Filling"] {
+            for (text, count) in [("password=secret-token-123", 25), ("口令🔒\nsecret", 10), ("", 0)] {
+                let message = input_status(action, text);
+                assert_eq!(
+                    message,
+                    format!("{action}: <redacted; {count} characters>"),
+                );
+                assert!(!message.contains("secret"));
+                assert!(!message.contains("口令"));
+            }
+        }
+    }
 }
 
 fn cmd_wait(ctx: &ExecutionContext, target: &str) -> Result<(), AxError> {

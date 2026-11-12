@@ -145,10 +145,17 @@ axcli --app Lark scroll '.chat-list' down 300 --strategy cg
 **Screenshot:**
 
 ```sh
-axcli --app Safari screenshot -o /tmp/safari.png
-axcli --app Safari screenshot '.toolbar' -o /tmp/toolbar.png
+axcli --app Safari screenshot
+axcli --app Safari screenshot '.toolbar' -o ./toolbar.png
 axcli --app Safari screenshot --ocr
 ```
+
+Screenshots default to `~/Library/Caches/axcli/` with directory permissions `0700`.
+All PNG outputs, including explicit `-o` paths, use permissions `0600` and are
+replaced atomically. Explicit output paths use an existing parent directory;
+choose a private directory when you also need to hide filenames. Existing
+symlinks at the output filename are replaced without modifying their targets.
+Text input commands report only the character count and never echo input contents.
 
 **Get element attributes:**
 
